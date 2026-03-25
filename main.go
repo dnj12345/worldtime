@@ -14,342 +14,673 @@
 //
 // Build:
 //
-//	go mod tidy
-//	go build -buildvcs=false -trimpath -ldflags="-s -w" -o worldtime .
+//  go mod tidy
+//  go build -buildvcs=false -trimpath -ldflags="-s -w" -o worldtime .
 //
 // Usage:
 //
-//	worldtime 'San Francisco'
-//	worldtime 'Manchester, NH'
-//	worldtime 'London, Ontario'
-//	worldtime Tokyo London 'New York'
-//	worldtime --list
+//  worldtime Tokyo London 'New York'
+//  worldtime --at "10:00am" Tokyo London 'New York'
+//  worldtime --at "14:30 UTC" Tokyo London 'New York'
+//  worldtime --list
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/url"
-	"os"
-	"sort"
-	"strings"
-	"time"
-	_ "time/tzdata" // embed IANA tzdata rules — no host zoneinfo needed
+  "bufio"
+  "encoding/json"
+  "fmt"
+  "net/http"
+  "net/url"
+  "os"
+  "path/filepath"
+  "sort"
+  "strconv"
+  "strings"
+  "time"
+  _ "time/tzdata" // embed IANA tzdata rules — no host zoneinfo needed
 
-	"github.com/ringsaturn/tzf"
+  "github.com/ringsaturn/tzf"
 )
 
 // ── Alias table ─────────────────────────────────────────────────────────────
-//
-// Only needed for cities that share a timezone zone with a differently-named
-// IANA representative (e.g. San Francisco → America/Los_Angeles).
-// The geocode fallback handles everything else automatically.
 
 var aliases = []struct{ city, tz string }{
-	// US Pacific
-	{"San Francisco", "America/Los_Angeles"},
-	{"SF", "America/Los_Angeles"},
-	{"Silicon Valley", "America/Los_Angeles"},
-	{"San Jose", "America/Los_Angeles"},
-	{"Oakland", "America/Los_Angeles"},
-	{"Sacramento", "America/Los_Angeles"},
-	{"San Diego", "America/Los_Angeles"},
-	// US Mountain
-	{"Salt Lake City", "America/Denver"},
-	{"Albuquerque", "America/Denver"},
-	// US Central
-	{"Houston", "America/Chicago"},
-	{"Dallas", "America/Chicago"},
-	{"Austin", "America/Chicago"},
-	{"San Antonio", "America/Chicago"},
-	{"Minneapolis", "America/Chicago"},
-	{"Kansas City", "America/Chicago"},
-	{"New Orleans", "America/Chicago"},
-	{"Memphis", "America/Chicago"},
-	{"Nashville", "America/Chicago"},
-	{"Milwaukee", "America/Chicago"},
-	// US Eastern
-	{"New York", "America/New_York"},
-	{"NYC", "America/New_York"},
-	{"Manhattan", "America/New_York"},
-	{"Brooklyn", "America/New_York"},
-	{"Philadelphia", "America/New_York"},
-	{"Washington DC", "America/New_York"},
-	{"Atlanta", "America/New_York"},
-	{"Miami", "America/New_York"},
-	{"Orlando", "America/New_York"},
-	{"Charlotte", "America/New_York"},
-	// Canada
-	{"Toronto", "America/Toronto"},
-	{"Ottawa", "America/Toronto"},
-	{"Montreal", "America/Toronto"},
-	{"Vancouver", "America/Vancouver"},
-	{"Calgary", "America/Edmonton"},
-	// Mexico
-	{"Mexico City", "America/Mexico_City"},
-	{"Guadalajara", "America/Mexico_City"},
-	// South America
-	{"Rio de Janeiro", "America/Sao_Paulo"},
-	{"Brasilia", "America/Sao_Paulo"},
-	{"Buenos Aires", "America/Argentina/Buenos_Aires"},
-	// Europe
-	{"London", "Europe/London"},
-	{"Barcelona", "Europe/Madrid"},
-	{"Lyon", "Europe/Paris"},
-	{"Hamburg", "Europe/Berlin"},
-	{"Munich", "Europe/Berlin"},
-	{"Frankfurt", "Europe/Berlin"},
-	{"Cologne", "Europe/Berlin"},
-	{"Geneva", "Europe/Zurich"},
-	{"Milan", "Europe/Rome"},
-	{"Naples", "Europe/Rome"},
-	{"Kyiv", "Europe/Kyiv"},
-	{"Kiev", "Europe/Kyiv"},
-	{"Saint Petersburg", "Europe/Moscow"},
-	{"St Petersburg", "Europe/Moscow"},
-	// Middle East
-	{"Tel Aviv", "Asia/Jerusalem"},
-	{"Jeddah", "Asia/Riyadh"},
-	{"Abu Dhabi", "Asia/Dubai"},
-	{"Kuwait City", "Asia/Kuwait"},
-	// South Asia
-	{"New Delhi", "Asia/Kolkata"},
-	{"Delhi", "Asia/Kolkata"},
-	{"Mumbai", "Asia/Kolkata"},
-	{"Bombay", "Asia/Kolkata"},
-	{"Bangalore", "Asia/Kolkata"},
-	{"Bengaluru", "Asia/Kolkata"},
-	{"Chennai", "Asia/Kolkata"},
-	{"Calcutta", "Asia/Kolkata"},
-	{"Islamabad", "Asia/Karachi"},
-	{"Lahore", "Asia/Karachi"},
-	// East Asia
-	{"Beijing", "Asia/Shanghai"},
-	{"Guangzhou", "Asia/Shanghai"},
-	{"Shenzhen", "Asia/Shanghai"},
-	{"Hong Kong", "Asia/Hong_Kong"},
-	{"Osaka", "Asia/Tokyo"},
-	{"Kyoto", "Asia/Tokyo"},
-	{"Busan", "Asia/Seoul"},
-	{"Ho Chi Minh City", "Asia/Ho_Chi_Minh"},
-	{"Saigon", "Asia/Ho_Chi_Minh"},
-	// Oceania
-	{"Sydney", "Australia/Sydney"},
-	{"Canberra", "Australia/Sydney"},
-	{"Auckland", "Pacific/Auckland"},
-	{"Wellington", "Pacific/Auckland"},
+  // US Pacific
+  {"San Francisco", "America/Los_Angeles"},
+  {"SF", "America/Los_Angeles"},
+  {"Silicon Valley", "America/Los_Angeles"},
+  {"San Jose", "America/Los_Angeles"},
+  {"Oakland", "America/Los_Angeles"},
+  {"Sacramento", "America/Los_Angeles"},
+  {"San Diego", "America/Los_Angeles"},
+  // US Mountain
+  {"Salt Lake City", "America/Denver"},
+  {"Albuquerque", "America/Denver"},
+  // US Central
+  {"Houston", "America/Chicago"},
+  {"Dallas", "America/Chicago"},
+  {"Austin", "America/Chicago"},
+  {"San Antonio", "America/Chicago"},
+  {"Minneapolis", "America/Chicago"},
+  {"Kansas City", "America/Chicago"},
+  {"New Orleans", "America/Chicago"},
+  {"Memphis", "America/Chicago"},
+  {"Nashville", "America/Chicago"},
+  {"Milwaukee", "America/Chicago"},
+  // US Eastern
+  {"New York", "America/New_York"},
+  {"NYC", "America/New_York"},
+  {"Manhattan", "America/New_York"},
+  {"Brooklyn", "America/New_York"},
+  {"Philadelphia", "America/New_York"},
+  {"Washington DC", "America/New_York"},
+  {"Atlanta", "America/New_York"},
+  {"Miami", "America/New_York"},
+  {"Orlando", "America/New_York"},
+  {"Charlotte", "America/New_York"},
+  // Canada
+  {"Toronto", "America/Toronto"},
+  {"Ottawa", "America/Toronto"},
+  {"Montreal", "America/Toronto"},
+  {"Vancouver", "America/Vancouver"},
+  {"Calgary", "America/Edmonton"},
+  // Mexico
+  {"Mexico City", "America/Mexico_City"},
+  {"Guadalajara", "America/Mexico_City"},
+  // South America
+  {"Rio de Janeiro", "America/Sao_Paulo"},
+  {"Brasilia", "America/Sao_Paulo"},
+  {"Buenos Aires", "America/Argentina/Buenos_Aires"},
+  // Europe
+  {"London", "Europe/London"},
+  {"Barcelona", "Europe/Madrid"},
+  {"Lyon", "Europe/Paris"},
+  {"Hamburg", "Europe/Berlin"},
+  {"Munich", "Europe/Berlin"},
+  {"Frankfurt", "Europe/Berlin"},
+  {"Cologne", "Europe/Berlin"},
+  {"Geneva", "Europe/Zurich"},
+  {"Milan", "Europe/Rome"},
+  {"Naples", "Europe/Rome"},
+  {"Kyiv", "Europe/Kyiv"},
+  {"Kiev", "Europe/Kyiv"},
+  {"Saint Petersburg", "Europe/Moscow"},
+  {"St Petersburg", "Europe/Moscow"},
+  // Middle East
+  {"Tel Aviv", "Asia/Jerusalem"},
+  {"Jeddah", "Asia/Riyadh"},
+  {"Abu Dhabi", "Asia/Dubai"},
+  {"Kuwait City", "Asia/Kuwait"},
+  // South Asia
+  {"New Delhi", "Asia/Kolkata"},
+  {"Delhi", "Asia/Kolkata"},
+  {"Mumbai", "Asia/Kolkata"},
+  {"Bombay", "Asia/Kolkata"},
+  {"Bangalore", "Asia/Kolkata"},
+  {"Bengaluru", "Asia/Kolkata"},
+  {"Chennai", "Asia/Kolkata"},
+  {"Calcutta", "Asia/Kolkata"},
+  {"Islamabad", "Asia/Karachi"},
+  {"Lahore", "Asia/Karachi"},
+  // East Asia
+  {"Beijing", "Asia/Shanghai"},
+  {"Guangzhou", "Asia/Shanghai"},
+  {"Shenzhen", "Asia/Shanghai"},
+  {"Hong Kong", "Asia/Hong_Kong"},
+  {"Osaka", "Asia/Tokyo"},
+  {"Kyoto", "Asia/Tokyo"},
+  {"Busan", "Asia/Seoul"},
+  {"Ho Chi Minh City", "Asia/Ho_Chi_Minh"},
+  {"Saigon", "Asia/Ho_Chi_Minh"},
+  // Oceania
+  {"Sydney", "Australia/Sydney"},
+  {"Canberra", "Australia/Sydney"},
+  {"Auckland", "Pacific/Auckland"},
+  {"Wellington", "Pacific/Auckland"},
 }
 
 // ── Local database ──────────────────────────────────────────────────────────
 
 type entry struct {
-	city string
-	tz   string
+  city string
+  tz   string
 }
 
-// loadDB builds the city→timezone database entirely from the embedded IANA
-// zone list — no filesystem access, no platform assumptions. Works identically
-// on Linux, macOS, Windows, Alpine, scratch containers, etc.
-//
-// The zone list (ianaZones below) is sourced from IANA tzdb and matches what
-// Go's time/tzdata package embeds. To pick up new zones, just upgrade Go:
-//
-//	go get -u && go mod tidy
 func loadDB() []entry {
-	var db []entry
-	for _, tz := range ianaZones {
-		parts := strings.Split(tz, "/")
-		city := strings.ReplaceAll(parts[len(parts)-1], "_", " ")
-		db = append(db, entry{city: city, tz: tz})
-	}
-	for _, a := range aliases {
-		db = append(db, entry{city: a.city, tz: a.tz})
-	}
-	return db
+  var db []entry
+  for _, tz := range ianaZones {
+    parts := strings.Split(tz, "/")
+    city := strings.ReplaceAll(parts[len(parts)-1], "_", " ")
+    db = append(db, entry{city: city, tz: tz})
+  }
+  for _, a := range aliases {
+    db = append(db, entry{city: a.city, tz: a.tz})
+  }
+  return db
 }
 
 // ── Local lookup ─────────────────────────────────────────────────────────────
 
 func findLocal(db []entry, query string) *entry {
-	q := strings.ToLower(query)
-	for pass := 0; pass < 4; pass++ {
-		for i := len(db) - 1; i >= 0; i-- {
-			city := strings.ToLower(db[i].city)
-			tz := strings.ToLower(db[i].tz)
-			switch pass {
-			case 0:
-				if city == q {
-					return &db[i]
-				}
-			case 1:
-				if strings.HasPrefix(city, q) {
-					return &db[i]
-				}
-			case 2:
-				if strings.Contains(city, q) {
-					return &db[i]
-				}
-			case 3:
-				if strings.Contains(tz, q) {
-					return &db[i]
-				}
-			}
-		}
-	}
-	return nil
+  q := strings.ToLower(query)
+  for pass := 0; pass < 4; pass++ {
+    for i := len(db) - 1; i >= 0; i-- {
+      city := strings.ToLower(db[i].city)
+      tz := strings.ToLower(db[i].tz)
+      switch pass {
+      case 0:
+        if city == q {
+          return &db[i]
+        }
+      case 1:
+        if strings.HasPrefix(city, q) {
+          return &db[i]
+        }
+      case 2:
+        if strings.Contains(city, q) {
+          return &db[i]
+        }
+      case 3:
+        if strings.Contains(tz, q) {
+          return &db[i]
+        }
+      }
+    }
+  }
+  return nil
 }
 
 // ── Geocode fallback ─────────────────────────────────────────────────────────
-//
-// Calls Nominatim (OpenStreetMap) to resolve any city/address string to
-// coordinates, then uses the tzf library to convert lat/lon → IANA timezone.
-// No API key required. Nominatim's usage policy requires a descriptive
-// User-Agent and asks for a max of 1 request/second (fine for a CLI tool).
 
 type nominatimResult struct {
-	Lat         string `json:"lat"`
-	Lon         string `json:"lon"`
-	DisplayName string `json:"display_name"`
+  Lat         string `json:"lat"`
+  Lon         string `json:"lon"`
+  DisplayName string `json:"display_name"`
 }
 
 func geocodeLookup(finder tzf.F, query string) (tzID string, displayName string, err error) {
-	apiURL := "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" +
-		url.QueryEscape(query)
+  apiURL := "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" +
+    url.QueryEscape(query)
 
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("User-Agent", "worldtime-cli/1.0 (https://github.com/dnj12345/worldtime)")
-	req.Header.Set("Accept-Language", "en")
+  req, err := http.NewRequest("GET", apiURL, nil)
+  if err != nil {
+    return "", "", err
+  }
+  req.Header.Set("User-Agent", "worldtime-cli/1.0 (https://github.com/dnj12345/worldtime)")
+  req.Header.Set("Accept-Language", "en")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", fmt.Errorf("geocode request failed: %w", err)
-	}
-	defer resp.Body.Close()
+  client := &http.Client{Timeout: 10 * time.Second}
+  resp, err := client.Do(req)
+  if err != nil {
+    return "", "", fmt.Errorf("geocode request failed: %w", err)
+  }
+  defer resp.Body.Close()
 
-	var results []nominatimResult
-	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
-		return "", "", fmt.Errorf("geocode response parse failed: %w", err)
-	}
-	if len(results) == 0 {
-		return "", "", fmt.Errorf("city not found: %q", query)
-	}
+  var results []nominatimResult
+  if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+    return "", "", fmt.Errorf("geocode response parse failed: %w", err)
+  }
+  if len(results) == 0 {
+    return "", "", fmt.Errorf("city not found: %q", query)
+  }
 
-	var lat, lon float64
-	fmt.Sscanf(results[0].Lat, "%f", &lat)
-	fmt.Sscanf(results[0].Lon, "%f", &lon)
+  var lat, lon float64
+  fmt.Sscanf(results[0].Lat, "%f", &lat)
+  fmt.Sscanf(results[0].Lon, "%f", &lon)
 
-	tz := finder.GetTimezoneName(lon, lat)
-	if tz == "" {
-		return "", "", fmt.Errorf("could not determine timezone for coordinates (%.4f, %.4f)", lat, lon)
-	}
-	return tz, results[0].DisplayName, nil
+  tz := finder.GetTimezoneName(lon, lat)
+  if tz == "" {
+    return "", "", fmt.Errorf("could not determine timezone for coordinates (%.4f, %.4f)", lat, lon)
+  }
+  return tz, results[0].DisplayName, nil
+}
+
+func resolveTZ(db []entry, finder tzf.F, query string) (string, error) {
+  if e := findLocal(db, query); e != nil {
+    return e.tz, nil
+  }
+  tzID, displayName, err := geocodeLookup(finder, query)
+  if err != nil {
+    return "", err
+  }
+  fmt.Fprintf(os.Stderr, "→ resolved %q to %s (%s)\n", query, displayName, tzID)
+  return tzID, nil
+}
+
+// ── Preferences (for ambiguous timezone abbreviations) ───────────────────────
+//
+// Stored in ~/.config/worldtime/prefs as simple KEY=VALUE lines, e.g.:
+//
+//  IST=Asia/Kolkata
+//  CST=America/Chicago
+//
+// Written interactively when the user resolves an ambiguity for the first time.
+
+func prefsPath() string {
+  dir, err := os.UserConfigDir() // ~/.config on Linux, ~/Library/Application Support on macOS
+  if err != nil {
+    return ""
+  }
+  return filepath.Join(dir, "worldtime", "prefs")
+}
+
+func loadPrefs() map[string]string {
+  prefs := map[string]string{}
+  path := prefsPath()
+  if path == "" {
+    return prefs
+  }
+  f, err := os.Open(path)
+  if err != nil {
+    return prefs // file simply doesn't exist yet
+  }
+  defer f.Close()
+  scanner := bufio.NewScanner(f)
+  for scanner.Scan() {
+    line := strings.TrimSpace(scanner.Text())
+    if line == "" || strings.HasPrefix(line, "#") {
+      continue
+    }
+    if k, v, ok := strings.Cut(line, "="); ok {
+      prefs[strings.TrimSpace(strings.ToUpper(k))] = strings.TrimSpace(v)
+    }
+  }
+  return prefs
+}
+
+func savePref(abbrev, ianaID string) {
+  path := prefsPath()
+  if path == "" {
+    return
+  }
+  if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+    return
+  }
+  f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+  if err != nil {
+    return
+  }
+  defer f.Close()
+  fmt.Fprintf(f, "%s=%s\n", strings.ToUpper(abbrev), ianaID)
+}
+
+// ── --at time parsing ────────────────────────────────────────────────────────
+//
+// Supported source timezones:
+//   - No suffix / "local" / "l"  → machine's local timezone
+//   - "UTC" / "utc" / "u" / "z" → UTC
+//
+// Supported time formats (case-insensitive, spaces optional):
+//   10am   10:00am   10:00AM   10:00   14:30
+
+// ambiguousAbbrevs maps abbreviations that mean different things in different
+// regions to a list of candidates shown to the user for disambiguation.
+var ambiguousAbbrevs = map[string][]struct{ label, iana string }{
+  "IST": {
+    {"India Standard Time", "Asia/Kolkata"},
+    {"Ireland Standard Time", "Europe/Dublin"},
+    {"Israel Standard Time", "Asia/Jerusalem"},
+  },
+  "CST": {
+    {"US Central Standard Time", "America/Chicago"},
+    {"China Standard Time", "Asia/Shanghai"},
+    {"Cuba Standard Time", "America/Havana"},
+  },
+  "AST": {
+    {"Atlantic Standard Time (Canada)", "America/Halifax"},
+    {"Arabia Standard Time", "Asia/Riyadh"},
+  },
+  "BST": {
+    {"British Summer Time", "Europe/London"},
+    {"Bangladesh Standard Time", "Asia/Dhaka"},
+  },
+  "PST": {
+    {"Philippine Standard Time", "Asia/Manila"},
+    {"Pacific Standard Time (US)", "America/Los_Angeles"},
+  },
+}
+
+// parseAtTime parses a time string like "10:00am", "14:30", "10am UTC", "9:30 local"
+// and returns a time.Time anchored to today in the resolved timezone.
+//
+// The prefs map is consulted first for any ambiguous abbreviation; if not found,
+// the user is prompted interactively and the choice is saved.
+func parseAtTime(s string, prefs map[string]string) (time.Time, error) {
+  s = strings.TrimSpace(s)
+
+  // Split off optional trailing timezone token.
+  var timePart, tzToken string
+  if idx := strings.LastIndex(s, " "); idx >= 0 {
+    candidate := strings.ToUpper(strings.TrimSpace(s[idx+1:]))
+    // Only treat last token as tz if it looks like one (all letters, 1-4 chars or IANA path)
+    rest := strings.TrimSpace(s[:idx])
+    if istzToken(candidate) {
+      timePart = rest
+      tzToken = candidate
+    } else {
+      timePart = s
+      tzToken = "LOCAL"
+    }
+  } else {
+    timePart = s
+    tzToken = "LOCAL"
+  }
+
+  // Resolve the timezone.
+  var loc *time.Location
+  switch tzToken {
+  case "LOCAL", "L", "":
+    loc = time.Local
+  case "UTC", "U", "Z", "GMT":
+    loc = time.UTC
+  default:
+    // Check ambiguous abbreviations.
+    if candidates, ambiguous := ambiguousAbbrevs[tzToken]; ambiguous {
+      ianaID, err := resolveAmbiguous(tzToken, candidates, prefs)
+      if err != nil {
+        return time.Time{}, err
+      }
+      var lerr error
+      loc, lerr = time.LoadLocation(ianaID)
+      if lerr != nil {
+        return time.Time{}, lerr
+      }
+    } else {
+      // Unknown abbreviation — tell the user clearly.
+      return time.Time{}, fmt.Errorf(
+        "unknown timezone %q\n"+
+          "  --at only supports local time (no suffix) and UTC (\"UTC\", \"u\", \"z\")\n"+
+          "  Example: worldtime --at \"10:00am\" Tokyo\n"+
+          "           worldtime --at \"14:30 UTC\" Tokyo",
+        tzToken)
+    }
+  }
+
+  // Parse the time portion.
+  hour, min, err := parseHHMM(timePart)
+  if err != nil {
+    return time.Time{}, fmt.Errorf("cannot parse time %q: %w", s, err)
+  }
+
+  now := time.Now().In(loc)
+  return time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, loc), nil
+}
+
+// istzToken returns true if s looks like a timezone abbreviation or IANA path.
+func istzToken(s string) bool {
+  if len(s) == 0 || len(s) > 32 {
+    return false
+  }
+  // IANA paths contain a slash
+  if strings.Contains(s, "/") {
+    return true
+  }
+  // Abbreviations are all uppercase letters, 1-5 chars
+  for _, c := range s {
+    if c < 'A' || c > 'Z' {
+      return false
+    }
+  }
+  return true
+}
+
+// parseHHMM parses "10am", "10:00am", "14:30", "10:00" → (hour, minute, error).
+func parseHHMM(s string) (int, int, error) {
+  s = strings.ToUpper(strings.ReplaceAll(s, " ", ""))
+  if s == "" {
+    return 0, 0, fmt.Errorf("empty time string")
+  }
+
+  var ampm string
+  if strings.HasSuffix(s, "AM") {
+    ampm = "AM"
+    s = s[:len(s)-2]
+  } else if strings.HasSuffix(s, "PM") {
+    ampm = "PM"
+    s = s[:len(s)-2]
+  }
+
+  var hour, min int
+  if idx := strings.Index(s, ":"); idx >= 0 {
+    h, err1 := strconv.Atoi(s[:idx])
+    m, err2 := strconv.Atoi(s[idx+1:])
+    if err1 != nil || err2 != nil {
+      return 0, 0, fmt.Errorf("invalid format")
+    }
+    hour, min = h, m
+  } else {
+    h, err := strconv.Atoi(s)
+    if err != nil {
+      return 0, 0, fmt.Errorf("invalid format")
+    }
+    hour = h
+  }
+
+  switch ampm {
+  case "AM":
+    if hour == 12 {
+      hour = 0
+    }
+  case "PM":
+    if hour != 12 {
+      hour += 12
+    }
+  }
+
+  if hour < 0 || hour > 23 || min < 0 || min > 59 {
+    return 0, 0, fmt.Errorf("time out of range")
+  }
+  return hour, min, nil
+}
+
+// resolveAmbiguous handles an abbreviation with multiple possible meanings.
+// It checks prefs first; if not found, prompts the user interactively and
+// saves their choice.
+func resolveAmbiguous(abbrev string, candidates []struct{ label, iana string }, prefs map[string]string) (string, error) {
+  // Already resolved in prefs?
+  if ianaID, ok := prefs[abbrev]; ok {
+    return ianaID, nil
+  }
+
+  // Not a TTY? Can't prompt — use first candidate and warn.
+  if !isTTY() {
+    fmt.Fprintf(os.Stderr,
+      "warning: %q is ambiguous, defaulting to %s (%s)\n"+
+        "  Set a preference: worldtime --set-tz %s %s\n",
+      abbrev, candidates[0].label, candidates[0].iana,
+      abbrev, candidates[0].iana)
+    return candidates[0].iana, nil
+  }
+
+  // Interactive prompt.
+  fmt.Fprintf(os.Stderr, "\n%q is ambiguous. Which timezone do you mean?\n\n", abbrev)
+  for i, c := range candidates {
+    fmt.Fprintf(os.Stderr, "  [%d] %s (%s)\n", i+1, c.label, c.iana)
+  }
+  fmt.Fprintf(os.Stderr, "\nEnter number (this will be saved to ~/.config/worldtime/prefs): ")
+
+  var choice int
+  _, err := fmt.Fscan(os.Stdin, &choice)
+  if err != nil || choice < 1 || choice > len(candidates) {
+    return "", fmt.Errorf("invalid selection for %q", abbrev)
+  }
+
+  selected := candidates[choice-1].iana
+  savePref(abbrev, selected)
+  prefs[abbrev] = selected // update in-memory too
+  fmt.Fprintf(os.Stderr, "Saved: %s=%s\n\n", abbrev, selected)
+  return selected, nil
+}
+
+// isTTY returns true if stdin is an interactive terminal.
+func isTTY() bool {
+  fi, err := os.Stdin.Stat()
+  if err != nil {
+    return false
+  }
+  return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 // ── Time formatting ──────────────────────────────────────────────────────────
 
-func printTime(tzID string) error {
-	loc, err := time.LoadLocation(tzID)
-	if err != nil {
-		return fmt.Errorf("unknown timezone %q: %w", tzID, err)
-	}
-	fmt.Println(time.Now().In(loc).Format("Mon Jan _2 15:04:05 MST 2006"))
-	return nil
+const timeFmt = "Mon Jan _2 15:04:05 MST 2006"
+
+func printNow(tzID string) error {
+  loc, err := time.LoadLocation(tzID)
+  if err != nil {
+    return fmt.Errorf("unknown timezone %q: %w", tzID, err)
+  }
+  fmt.Println(time.Now().In(loc).Format(timeFmt))
+  return nil
+}
+
+func printAt(t time.Time, tzID string) error {
+  loc, err := time.LoadLocation(tzID)
+  if err != nil {
+    return fmt.Errorf("unknown timezone %q: %w", tzID, err)
+  }
+  fmt.Println(t.In(loc).Format(timeFmt))
+  return nil
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
+func usage(name string) {
+  fmt.Fprintf(os.Stderr,
+    "Usage:\n"+
+      "  %s <city> [city2 ...]                     current local time in each city\n"+
+      "  %s --at <time> <city> [city2 ...]         convert a time to each city's local time\n"+
+      "  %s --set-tz <ABBREV> <IANA>               save a timezone abbreviation preference\n"+
+      "  %s --list                                  list all cities in the local DB\n\n"+
+      "Time formats for --at:\n"+
+      "  Local time:  \"10am\"  \"10:00am\"  \"14:30\"  \"9:30pm\"\n"+
+      "  UTC time:    \"10am UTC\"  \"14:30 UTC\"  \"9:30 u\"  \"14:30 z\"\n\n"+
+      "Examples:\n"+
+      "  %s Tokyo London 'New York'\n"+
+      "  %s --at '10:00am' Tokyo London 'New York'\n"+
+      "  %s --at '14:30 UTC' Sydney Seoul Mumbai\n",
+    name, name, name, name, name, name, name)
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr,
-			"Usage: %s <city> [city2 ...]\n"+
-				"       %s --list\n\n"+
-				"Examples:\n"+
-				"  %s Tokyo\n"+
-				"  %s 'Manchester, NH'\n"+
-				"  %s 'London, Ontario' Paris Tokyo\n",
-			os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
-		os.Exit(1)
-	}
+  if len(os.Args) < 2 {
+    usage(os.Args[0])
+    os.Exit(1)
+  }
 
-	db := loadDB()
+  db := loadDB()
+  prefs := loadPrefs()
 
-	if os.Args[1] == "--list" {
-		sorted := make([]entry, len(db))
-		copy(sorted, db)
-		sort.Slice(sorted, func(i, j int) bool {
-			return strings.ToLower(sorted[i].city) < strings.ToLower(sorted[j].city)
-		})
-		fmt.Printf("%-35s  %s\n", "City", "Timezone")
-		fmt.Printf("%-35s  %s\n", "----", "--------")
-		for _, e := range sorted {
-			fmt.Printf("%-35s  %s\n", e.city, e.tz)
-		}
-		fmt.Printf("\n%d entries in local DB (unknown cities resolved via OpenStreetMap)\n", len(db))
-		return
-	}
+  switch os.Args[1] {
 
-	// Initialise the tzf timezone finder (used only for geocode fallback).
-	// This embeds ~5MB of timezone boundary data in the binary.
-	finder, err := tzf.NewDefaultFinder()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error: failed to init timezone finder:", err)
-		os.Exit(1)
-	}
+  // ── --list ───────────────────────────────────────────────────────────────
+  case "--list":
+    sorted := make([]entry, len(db))
+    copy(sorted, db)
+    sort.Slice(sorted, func(i, j int) bool {
+      return strings.ToLower(sorted[i].city) < strings.ToLower(sorted[j].city)
+    })
+    fmt.Printf("%-35s  %s\n", "City", "Timezone")
+    fmt.Printf("%-35s  %s\n", "----", "--------")
+    for _, e := range sorted {
+      fmt.Printf("%-35s  %s\n", e.city, e.tz)
+    }
+    fmt.Printf("\n%d entries in local DB (unknown cities resolved via OpenStreetMap)\n", len(db))
 
-	multi := len(os.Args) > 2
-	exitCode := 0
+  // ── --set-tz ─────────────────────────────────────────────────────────────
+  case "--set-tz":
+    if len(os.Args) != 4 {
+      fmt.Fprintln(os.Stderr, "Usage: worldtime --set-tz <ABBREV> <IANA_ID>")
+      fmt.Fprintln(os.Stderr, "Example: worldtime --set-tz IST Asia/Kolkata")
+      os.Exit(1)
+    }
+    abbrev := strings.ToUpper(os.Args[2])
+    ianaID := os.Args[3]
+    if _, err := time.LoadLocation(ianaID); err != nil {
+      fmt.Fprintf(os.Stderr, "error: %q is not a valid IANA timezone ID\n", ianaID)
+      os.Exit(1)
+    }
+    savePref(abbrev, ianaID)
+    fmt.Printf("Saved: %s=%s  (in %s)\n", abbrev, ianaID, prefsPath())
 
-	for _, query := range os.Args[1:] {
-		if multi {
-			fmt.Printf("%-22s  ", query)
-		}
+  // ── --at ─────────────────────────────────────────────────────────────────
+  case "--at", "-a":
+    if len(os.Args) < 4 {
+      fmt.Fprintf(os.Stderr, "error: --at requires a time and at least one city\n\n")
+      usage(os.Args[0])
+      os.Exit(1)
+    }
+    sourceTimeStr := os.Args[2]
+    cities := os.Args[3:]
 
-		// Stage 1: fast local lookup
-		if e := findLocal(db, query); e != nil {
-			if err := printTime(e.tz); err != nil {
-				fmt.Fprintln(os.Stderr, "error:", err)
-				exitCode = 1
-			}
-			continue
-		}
+    sourceTime, err := parseAtTime(sourceTimeStr, prefs)
+    if err != nil {
+      fmt.Fprintln(os.Stderr, "error:", err)
+      os.Exit(1)
+    }
 
-		// Stage 2: geocode via Nominatim + tzf
-		tzID, displayName, err := geocodeLookup(finder, query)
-		if err != nil {
-			if multi {
-				fmt.Println()
-			}
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			exitCode = 1
-			continue
-		}
+    finder := initFinder()
+    multi := len(cities) > 1
+    exitCode := 0
 
-		// Print resolved location on stderr so stdout stays clean
-		fmt.Fprintf(os.Stderr, "→ resolved %q to %s (%s)\n", query, displayName, tzID)
-		if err := printTime(tzID); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			exitCode = 1
-		}
-	}
+    for _, query := range cities {
+      if multi {
+        fmt.Printf("%-22s  ", query)
+      }
+      tzID, err := resolveTZ(db, finder, query)
+      if err != nil {
+        if multi {
+          fmt.Println()
+        }
+        fmt.Fprintf(os.Stderr, "error: %v\n", err)
+        exitCode = 1
+        continue
+      }
+      if err := printAt(sourceTime, tzID); err != nil {
+        fmt.Fprintln(os.Stderr, "error:", err)
+        exitCode = 1
+      }
+    }
+    os.Exit(exitCode)
 
-	os.Exit(exitCode)
+  // ── default: show current time ───────────────────────────────────────────
+  default:
+    finder := initFinder()
+    multi := len(os.Args) > 2
+    exitCode := 0
+
+    for _, query := range os.Args[1:] {
+      if multi {
+        fmt.Printf("%-22s  ", query)
+      }
+      tzID, err := resolveTZ(db, finder, query)
+      if err != nil {
+        if multi {
+          fmt.Println()
+        }
+        fmt.Fprintf(os.Stderr, "error: %v\n", err)
+        exitCode = 1
+        continue
+      }
+      if err := printNow(tzID); err != nil {
+        fmt.Fprintln(os.Stderr, "error:", err)
+        exitCode = 1
+      }
+    }
+    os.Exit(exitCode)
+  }
+}
+
+func initFinder() tzf.F {
+  finder, err := tzf.NewDefaultFinder()
+  if err != nil {
+    fmt.Fprintln(os.Stderr, "error: failed to init timezone finder:", err)
+    os.Exit(1)
+  }
+  return finder
 }
 
 // ── Embedded IANA zone list ──────────────────────────────────────────────────
-//
-// Canonical list of IANA timezone IDs, matching what Go's time/tzdata embeds.
-// City names for the local DB are derived from the last path component at
-// startup in loadDB() — no filesystem access needed.
-//
-// To update: upgrade Go and run `go mod tidy`. The list itself rarely changes;
-// IANA typically adds 0-3 zones per year.
-//
-// Source: https://data.iana.org/time-zones/tzdb-latest.tar.lz
 
 var ianaZones = strings.Fields(`
 Africa/Abidjan Africa/Accra Africa/Addis_Ababa Africa/Algiers Africa/Asmara
